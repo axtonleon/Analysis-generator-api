@@ -206,7 +206,7 @@ async def load_and_initially_analyze_data(file: UploadFile) -> Tuple[Optional[pd
 
             # --- Perform initial analyses ---
             df_head_sample = current_df.head().to_string()
-            analysis_ideas = llm_service.generate_analysis_ideas(current_df_columns, df_head_sample, max_ideas=1)
+            analysis_ideas = llm_service.generate_analysis_ideas(current_df_columns, df_head_sample, max_ideas=3)
 
             for i, (title, idea_question) in enumerate(analysis_ideas):
                 if len(initial_analyses_results) >= 5: break

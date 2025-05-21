@@ -1,5 +1,6 @@
 # main.py
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 import routes
 
@@ -23,7 +24,7 @@ app.include_router(routes.router, prefix="/api")
 
 @app.get("/")
 async def root():
-    return {"message": "Welcome to the Data Analysis API. Visit /docs for API documentation."}
+    return RedirectResponse(url="/docs")
 
 if __name__ == "__main__":
     import uvicorn
