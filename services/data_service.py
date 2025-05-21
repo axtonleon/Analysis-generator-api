@@ -48,78 +48,70 @@ def get_current_filename() -> Optional[str]:
     return current_filename
 
 # NEW HELPER FUNCTION: Convert query results to JSON serializable structure
+
 def _to_json_serializable(result: Any) -> Any:
     """
     Converts various Pandas/NumPy result types into standard Python types
     suitable for JSON serialization. Handles DataFrames, Series, NumPy arrays,
     and scalar NumPy types. Converts pandas nulls (NaN, NaT) to Python None.
     """
+    def _convert_scalar(x):
+        if x is None:
+            return None
+        if isinstance(x, np.integer):  # NumPy integer
+            return int(x)
+        if isinstance(x, np.floating):  # NumPy float
+            return float(x)
+        if isinstance(x, np.bool_):  # NumPy bool
+            return bool(x)
+        if isinstance(x, (pd.Timestamp, np.datetime64)):  # date/time
+            return str(x)
+        return x
+
     if result is None:
         return None
-    elif isinstance(result, pd.DataFrame):
-        # Convert DataFrame values. Use applymap with na_action='ignore'
-        # Then use .where to put None back for original NaNs
-        return result.applymap(
-            lambda x: (int(x) if isinstance(x, np.integer) else
-                       (float(x) if isinstance(x, np.floating) else
-                        (bool(x) if isinstance(x, np.bool_) else
-                         (str(x) if isinstance(x, (pd.Timestamp, np.datetime64)) else
-                          x)))), # <-- Removed `None if pd.isna(x)` from inside lambda
-            na_action='ignore' # <-- Correctly pass na_action to applymap
-        ).where(pd.notnull(result), None).to_dict(orient="records") # <-- Use where after applymap
 
-    elif isinstance(result, pd.Series):
-         # Convert Series values. Use apply with na_action='ignore'
-         # Then use .where to put None back for original NaNs
-         series_processed = result.apply(
-             lambda x: (int(x) if isinstance(x, np.integer) else
-                        (float(x) if isinstance(x, np.floating) else
-                         (bool(x) if isinstance(x, np.bool_) else
-                          (str(x) if isinstance(x, (pd.Timestamp, np.datetime64)) else
-                           x)))), # <-- Removed `None if pd.isna(x)` from inside lambda
-             na_action='ignore' # <-- Correctly pass na_action to apply
-         ).where(pd.notnull(result), None) # <-- Use where after apply
+    # DataFrame: replace NaNs with None, convert each cell, then to records
+    if isinstance(result, pd.DataFrame):
+        df = result.where(pd.notnull(result), None)
+        return df.applymap(_convert_scalar).to_dict(orient="records")
 
-         try:
-            # Convert index keys to string and ensure values are processed
-            return {str(k): v for k, v in series_processed.items()}
-         except TypeError: # Fallback for complex indices
-             # Convert index to string and process values
-             return {str(k): series_processed.loc[k] for k in series_processed.index}
+    # Series: replace NaNs with None, convert each value, then to dict
+    if isinstance(result, pd.Series):
+        series = result.where(pd.notnull(result), None)
+        processed = series.map(_convert_scalar)
+        try:
+            return {str(k): v for k, v in processed.items()}
+        except Exception:
+            return {str(k): processed.loc[k] for k in processed.index}
 
-    elif isinstance(result, np.ndarray):
-        # Convert NumPy array to list. Use apply via Series with na_action='ignore'
-        # Then use .where to put None back for original NaNs
-        return pd.Series(result).apply(
-            lambda x: (int(x) if isinstance(x, np.integer) else
-                       (float(x) if isinstance(x, np.floating) else
-                        (bool(x) if isinstance(x, np.bool_) else
-                         (str(x) if isinstance(x, (pd.Timestamp, np.datetime64)) else
-                          x)))), # <-- Removed `None if pd.isna(x)` from inside lambda
-            na_action='ignore' # <-- Correctly pass na_action to apply
-        ).where(pd.notnull(pd.Series(result)), None).tolist() # <-- Use where after apply
+    # NumPy array: convert via Series, then to list
+    if isinstance(result, np.ndarray):
+        series = pd.Series(result).where(pd.notnull(result), None)
+        processed = series.map(_convert_scalar)
+        return processed.tolist()
 
-
-    # Handle NumPy scalar types explicitly (These don't use apply/applymap)
-    elif isinstance(result, np.integer):
+    # NumPy scalar types
+    if isinstance(result, np.integer):
         return int(result)
-    elif isinstance(result, np.floating):
+    if isinstance(result, np.floating):
         return float(result)
-    elif isinstance(result, np.bool_):
+    if isinstance(result, np.bool_):
         return bool(result)
-    elif isinstance(result, (pd.Timestamp, np.datetime64)):
-        return str(result) # Convert pandas/numpy date/time scalars to string
-    elif pd.isna(result):
-         return None # Convert any remaining pandas null scalar that wasn't caught above
+    if isinstance(result, (pd.Timestamp, np.datetime64)):
+        return str(result)
 
-    # For standard Python types (int, float, str, bool, list, dict, None), return directly
-    # Add a final check just in case something unexpected gets here
+    # Pandas nulls
+    if pd.isna(result):
+        return None
+
+    # Fallback: if already JSON serializable, return; else convert to string
     try:
-        json.dumps(result) # Test if it's already serializable
+        json.dumps(result)
         return result
-    except (TypeError, OverflowError): # Catch OverflowError for very large ints
+    except (TypeError, OverflowError):
         logger.warning(f"Result of type {type(result)} is not JSON serializable, converting to string.")
-        return str(result) # Fallback for any other non-serializable type
+        return str(result)
 
 
 # --- Query Execution Helper (Used in Initial Analysis) ---
