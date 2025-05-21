@@ -219,7 +219,6 @@ def prepare_data_for_plotly(
     
 
     return data_for_plotly, None
-
 def transform_data_for_visualization(result: Any, chart_type_str: str) -> Tuple[Optional[Dict], Optional[str]]:
     """
     Transforms query result data (DataFrame, Series, etc.) into a format suitable for Plotly Express.
@@ -260,235 +259,189 @@ def transform_data_for_visualization(result: Any, chart_type_str: str) -> Tuple[
     if result is None or (isinstance(result, (pd.DataFrame, pd.Series)) and result.empty):
         return None, "Input data for visualization is empty."
 
+    # Convert the result (now guaranteed DataFrame or Series) to a DataFrame for consistent handling
+    if isinstance(result, pd.Series):
+        # Reset index to turn Series into DataFrame with index as a column
+        df_viz = result.reset_index()
+         # Rename default columns for clarity if index was unnamed and value column was default '0'
+        if df_viz.columns[0] == 'index' and df_viz.index.name is None:
+             df_viz.rename(columns={'index': 'Category'}, inplace=True)
+        if len(df_viz.columns) > 1 and df_viz.columns[1] == 0: # Ensure column 1 exists before renaming
+             df_viz.rename(columns={0: 'Value'}, inplace=True)
+
+    else: # It's already a DataFrame
+        df_viz = result.copy() # Work on a copy
+
 
     try:
-        # Apply initial type conversion and null handling if it's a DataFrame or Series
-        if isinstance(result, pd.DataFrame):
-             # Convert specific non-serializable types like Timestamps to strings
-             result = result.applymap(lambda x: str(x) if isinstance(x, pd.Timestamp) else x, na_action='ignore')
-             # Convert pandas nulls (NaN, NaT, None) to Python None
-             result = result.where(pd.notnull(result), None)
-        elif isinstance(result, pd.Series):
-             # Convert specific non-serializable types like Timestamps to strings
-             result = result.applymap(lambda x: str(x) if isinstance(x, pd.Timestamp) else x, na_action='ignore')
-             # Convert pandas nulls (NaN, NaT, None) to Python None
-             result = result.where(pd.notnull(result), None)
+        # Apply initial type conversion (Timestamps to strings) and null handling (NaN/NaT to None)
+        # FIX: Apply applymap/where AFTER converting Series to DataFrame (df_viz)
+        df_viz = df_viz.applymap(lambda x: str(x) if isinstance(x, pd.Timestamp) else x, na_action='ignore')
+        df_viz = df_viz.where(pd.notnull(df_viz), None)
 
 
         data_for_plotly: Dict[str, Any] = {}
 
-        if isinstance(result, pd.DataFrame):
-            # Logic similar to prepare_data_for_plotly, but inferring columns
-            if extracted_chart_type == "grouped_bar":
-                # Assumption for LLM pipeline: The query result for grouped bar is already "tall"
-                # with at least 3 columns: category, series, value.
-                # We'll map the first column to X, second to Color, third to Y (value).
-                if len(result.columns) >= 3:
-                    x_col = result.columns[0]
-                    color_col = result.columns[1]
-                    y_col = result.columns[2] # This is the VALUE column
+        # Infer column roles based on chart type and DataFrame structure
+        x_col_name = None
+        y_col_name = None
+        color_col_name = None # LLM pipeline doesn't typically infer color/size automatically
+        size_col_name = None
 
-                    # Ensure Y column is numeric for grouped bar, coerce errors to None and drop
-                    try:
-                        # FIX: Explicitly create Series before pd.to_numeric
-                        numeric_y_series = pd.to_numeric(pd.Series(result[y_col]), errors='coerce')
-                        # Drop rows where value became NaN, or where X/Color is also None
-                        valid_indices = numeric_y_series.dropna().index
-                        if x_col: valid_indices = valid_indices.intersection(result[x_col].dropna().index)
-                        if color_col: valid_indices = valid_indices.intersection(result[color_col].dropna().index)
+        if extracted_chart_type == "grouped_bar":
+            # Assumption for LLM pipeline: The query result for grouped bar is already "tall"
+            # with at least 3 columns: category, series, value.
+            # We'll map the first column to X, second to Color, third to Y (value).
+            if len(df_viz.columns) >= 3:
+                x_col_name = df_viz.columns[0]
+                color_col_name = df_viz.columns[1]
+                y_col_name = df_viz.columns[2] # This is the VALUE column
 
-                        result_filtered = result.loc[valid_indices].copy()
-                        result_filtered[y_col] = numeric_y_series.loc[valid_indices] # Update Y column with numeric values
-
-                        if result_filtered.empty:
-                             return None, "Grouped bar chart data is empty after filtering for non-null numeric values."
-
-                        data_for_plotly = {"data_frame": result_filtered.to_dict(orient='list'), "x": x_col, "y": y_col, "color": color_col}
-                        data_for_plotly["data_frame"] = deep_convert_numpy_to_python(data_for_plotly["data_frame"])
-
-                    except Exception as num_e:
-                         return None, f"Error ensuring numeric data for grouped bar Y-axis (inferred column '{y_col}'): {num_e}"
-
-                else: return None, "DataFrame for grouped bar needs at least 3 columns (Category, Series, Value)."
-
-            elif extracted_chart_type in ["bar", "line", "scatter", "pie"]:
-                if len(result.columns) >= 2:
-                     col0_data = result.iloc[:, 0]
-                     col1_data = result.iloc[:, 1]
-                     x_col_name = result.columns[0]
-                     y_col_name = result.columns[1]
-
-                     # For scatter and pie, ensure Y/values are primarily numeric, coerce errors to None and drop
-                     if extracted_chart_type in ["scatter", "pie"]:
-                         try:
-                             # FIX: Explicitly create Series before pd.to_numeric
-                             numeric_vals_series = pd.to_numeric(pd.Series(col1_data), errors='coerce')
-                             # Drop entries where the numeric value is None after coercion, or where x/name is also None
-                             valid_indices = numeric_vals_series.dropna().index.intersection(col0_data.dropna().index)
-
-                             df_filtered = pd.DataFrame({x_col_name: col0_data.loc[valid_indices],
-                                                         y_col_name: numeric_vals_series.loc[valid_indices]})
-
-                             if df_filtered.empty:
-                                  return None, f"{extracted_chart_type} chart requires two columns with corresponding non-null numeric values (Y/Values)."
-
-                             if extracted_chart_type == "pie":
-                                 # For pie, map the first column to names and second to values explicitly
-                                 data_for_plotly = {"data_frame": df_filtered.to_dict(orient='list'), "names": x_col_name, "values": y_col_name}
-                                 data_for_plotly["data_frame"] = deep_convert_numpy_to_python(data_for_plotly["data_frame"])
-                             else: # Scatter
-                                 data_for_plotly = {"data_frame": df_filtered.to_dict(orient='list'), "x": x_col_name, "y": y_col_name}
-                                 data_for_plotly["data_frame"] = deep_convert_numpy_to_python(data_for_plotly["data_frame"])
+                # Ensure Y column is numeric for grouped bar, coerce errors to None and drop rows where Y becomes NaN
+                try:
+                    # Explicitly create Series before pd.to_numeric
+                    numeric_y_series = pd.to_numeric(pd.Series(df_viz[y_col_name]), errors='coerce')
+                    # Drop rows where value became NaN, or where X/Color is also None
+                    valid_indices = numeric_y_series.dropna().index # Start with non-null numeric indices
+                    if x_col_name: valid_indices = valid_indices.intersection(df_viz[x_col_name].dropna().index) # Intersect with non-null X indices
+                    if color_col_name: valid_indices = valid_indices.intersection(df_viz[color_col_name].dropna().index) # Intersect with non-null Color indices
 
 
-                         except Exception as num_e:
-                              return None, f"Error ensuring numeric data for {extracted_chart_type} chart: {num_e}"
+                    df_viz = df_viz.loc[valid_indices].copy()
+                    df_viz[y_col_name] = numeric_y_series.loc[valid_indices] # Update Y column with numeric values
 
-                     # For bar/line, Y should ideally be numeric, coerce errors to None but don't necessarily drop rows unless X is also None
-                     if extracted_chart_type in ["bar", "line"]:
-                          try:
-                             # FIX: Explicitly create Series before pd.to_numeric
-                             numeric_y_series = pd.to_numeric(pd.Series(col1_data), errors='coerce')
-                             # Keep rows where X is not null OR Y is not null after coercion
-                             valid_indices = col0_data.dropna().index.union(numeric_y_series.dropna().index)
-
-                             df_processed = pd.DataFrame({x_col_name: col0_data.loc[valid_indices],
-                                                          y_col_name: numeric_y_series.loc[valid_indices].where(pd.notnull(numeric_y_series.loc[valid_indices]), None)
-                                                          })
-
-                             if df_processed[y_col_name].isnull().sum() > len(df_processed) * 0.5:
-                                  logger.warning(f"Y-axis for {extracted_chart_type} ('{y_col_name}') seems mostly non-numeric or null after coercion. Proceeding anyway.")
-
-                             data_for_plotly = {"data_frame": df_processed.to_dict(orient='list'), "x": x_col_name, "y": y_col_name}
-                             data_for_plotly["data_frame"] = deep_convert_numpy_to_python(data_for_plotly["data_frame"])
+                    if df_viz.empty:
+                         return None, "Grouped bar chart data is empty after filtering for non-null numeric values."
 
 
-                          except Exception as num_e:
-                             logger.warning(f"Could not fully numeric-coerce Y-axis for {extracted_chart_type} ('{y_col_name}'): {num_e}. Proceeding with original data.")
-                             # Fallback: use the original data (with Timestamp/NaN->str/None conversion applied earlier)
-                             data_for_plotly = {"data_frame": result[[x_col_name, y_col_name]].to_dict(orient='list'), "x": x_col_name, "y": y_col_name}
-                             data_for_plotly["data_frame"] = deep_convert_numpy_to_python(data_for_plotly["data_frame"])
+                except Exception as num_e:
+                     return None, f"Error ensuring numeric data for grouped bar Y-axis (inferred column '{y_col_name}'): {num_e}"
 
+            else: return None, "DataFrame for grouped bar needs at least 3 columns (Category, Series, Value)."
 
-                # Added handling for 1 column DataFrame result (e.g., value_counts().to_frame())
-                elif len(result.columns) == 1 and extracted_chart_type in ["bar", "pie"]:
-                     # Assume the index is the category (names) and the single column is the value
-                     col0_data = result.iloc[:, 0] # This is the value column
-                     index_data = result.index # This is the category/name index
+        elif extracted_chart_type in ["bar", "line", "scatter", "pie"]:
+            if len(df_viz.columns) >= 2:
+                 x_col_name = df_viz.columns[0]
+                 y_col_name = df_viz.columns[1]
 
-                     # Convert index and values to lists, handling Timestamp/NaN to str/None
-                     names_list = [str(x) if isinstance(x, (pd.Timestamp, pd.NaT)) else (None if pd.isna(x) else x) for x in index_data.tolist()]
-                     values_list = [str(x) if isinstance(x, (pd.Timestamp, pd.NaT)) else (None if pd.isna(x) else x) for x in col0_data.tolist()]
-
-                     # For bar and pie, values must be numeric. Coerce errors to None and drop
+                 # For scatter and pie, ensure Y/values are primarily numeric, coerce errors to None and drop rows where Y becomes NaN
+                 if extracted_chart_type in ["scatter", "pie"]:
                      try:
-                          # FIX: Explicitly create Series before pd.to_numeric
-                          numeric_values_series = pd.to_numeric(pd.Series(values_list), errors='coerce')
-                          # Drop entries where value became None after coercion OR where name is None
-                          valid_indices = numeric_values_series.dropna().index.intersection(pd.Series(names_list).dropna().index)
+                         # Explicitly create Series before pd.to_numeric
+                         numeric_vals_series = pd.to_numeric(pd.Series(df_viz[y_col_name]), errors='coerce')
+                         # Drop entries where the numeric value is None after coercion, or where x/name is also None
+                         valid_indices = numeric_vals_series.dropna().index.intersection(df_viz[x_col_name].dropna().index)
 
-                          names_list_filtered = [names_list[i] for i in valid_indices]
-                          values_list_filtered = numeric_values_series.loc[valid_indices].tolist() # numeric list
+                         df_filtered = df_viz.loc[valid_indices].copy()
+                         df_filtered[y_col_name] = numeric_vals_series.loc[valid_indices] # Update Y column
 
 
-                          if not names_list_filtered or not values_list_filtered:
-                               return None, f"{extracted_chart_type} chart from 1-column result requires non-null names (index) and numeric values."
+                         if df_filtered.empty:
+                              return None, f"{extracted_chart_type} chart requires two columns with corresponding non-null numeric values (Y/Values)."
 
-                          df_filtered = pd.DataFrame({"names": names_list_filtered, "values": values_list_filtered})
+                         df_viz = df_filtered # Use the filtered DataFrame
 
-                          if extracted_chart_type == "pie":
-                              data_for_plotly = {"data_frame": df_filtered.to_dict(orient='list'), "names": "names", "values": "values"}
-                              data_for_plotly["data_frame"] = deep_convert_numpy_to_python(data_for_plotly["data_frame"])
-                          else: # bar
-                              data_for_plotly = {"data_frame": df_filtered.to_dict(orient='list'), "x": "names", "y": "values"}
-                              data_for_plotly["data_frame"] = deep_convert_numpy_to_python(data_for_plotly["data_frame"])# Use "names" for X, "values" for Y
 
                      except Exception as num_e:
-                          return None, f"Error ensuring numeric data for {extracted_chart_type} from 1-column result: {num_e}"
+                          return None, f"Error ensuring numeric data for {extracted_chart_type} chart: {num_e}"
 
-                else: return None, f"Need at least 2 columns for {extracted_chart_type} chart (or 1 column Series result for bar/pie)."
+                 # For bar/line, Y should ideally be numeric, coerce errors to None but don't necessarily drop rows unless X is also None
+                 if extracted_chart_type in ["bar", "line"]:
+                      try:
+                         # Explicitly create Series before pd.to_numeric
+                         numeric_y_series = pd.to_numeric(pd.Series(df_viz[y_col_name]), errors='coerce')
+                         # Keep rows where X is not null OR Y is not null after coercion
+                         valid_indices_keep = df_viz[x_col_name].dropna().index.union(numeric_y_series.dropna().index)
 
-        elif isinstance(result, pd.Series):
-            if not result.empty:
-                # Convert Series to DataFrame for easier handling, preserving index as a column
-                result_df = result.reset_index()
-                # Ensure data types are compatible after reset_index and before applying map/where
-                result_df = result_df.applymap(lambda x: str(x) if isinstance(x, pd.Timestamp) else x, na_action='ignore')
-                result_df = result_df.where(pd.notnull(result_df), None)
+                         df_processed = df_viz.loc[valid_indices_keep].copy()
+                         df_processed[y_col_name] = numeric_y_series.loc[valid_indices_keep].where(pd.notnull(numeric_y_series.loc[valid_indices_keep]), None)
 
-                # After reset_index, we expect columns 'index' (or similar) and '0' (the value)
-                if len(result_df.columns) >= 2:
-                    x_col_name = result_df.columns[0] # Index column
-                    y_col_name = result_df.columns[1] # Value column
-
-
-                    # For scatter and pie from Series, ensure Y (value) is numeric, coerce errors to None and drop
-                    if extracted_chart_type in ["scatter", "pie"]:
-                        try:
-                             # FIX: Explicitly create Series before pd.to_numeric
-                             numeric_vals_series = pd.to_numeric(pd.Series(result_df[y_col_name]), errors='coerce')
-                             # Drop entries where value became None after coercion OR where x/name is None
-                             valid_indices = numeric_vals_series.dropna().index.intersection(result_df[x_col_name].dropna().index)
-
-                             df_filtered = result_df.loc[valid_indices].copy()
-                             df_filtered[y_col_name] = numeric_vals_series.loc[valid_indices] # Update Y column
+                         if df_processed[y_col_name].isnull().sum() > len(df_processed) * 0.5:
+                              logger.warning(f"Y-axis for {extracted_chart_type} ('{y_col_name}') seems mostly non-numeric or null after coercion. Proceeding anyway.")
+                         df_viz = df_processed # Use the processed DataFrame
 
 
-                             if df_filtered.empty:
-                                  return None, f"{extracted_chart_type} from Series requires index (names) and numeric values with corresponding non-null entries."
-
-                             if extracted_chart_type == "pie":
-                                 data_for_plotly = {"data_frame": df_filtered.to_dict(orient='list'), "names": x_col_name, "values": y_col_name}
-                                 data_for_plotly["data_frame"] = deep_convert_numpy_to_python(data_for_plotly["data_frame"])
-                             else: # Scatter
-                                 data_for_plotly = {"data_frame": df_filtered.to_dict(orient='list'), "x": x_col_name, "y": y_col_name}
-                                 data_for_plotly["data_frame"] = deep_convert_numpy_to_python(data_for_plotly["data_frame"])
-
-                        except Exception as num_e:
-                             return None, f"Error ensuring numeric data for {extracted_chart_type} from Series: {num_e}"
-
-                    elif extracted_chart_type in ["bar", "line"]:
-                         try:
-                             # FIX: Explicitly create Series before pd.to_numeric
-                             numeric_y_series = pd.to_numeric(pd.Series(result_df[y_col_name]), errors='coerce')
-                             # Keep rows where X is not null OR Y is not null after coercion
-                             valid_indices = result_df[x_col_name].dropna().index.union(numeric_y_series.dropna().index)
-
-                             df_processed = result_df.loc[valid_indices].copy()
-                             df_processed[y_col_name] = numeric_y_series.loc[valid_indices].where(pd.notnull(numeric_y_series.loc[valid_indices]), None)
+                      except Exception as num_e:
+                         logger.warning(f"Could not fully numeric-coerce Y-axis for {extracted_chart_type} ('{y_col_name}'): {num_e}. Proceeding with original data.")
+                         # Fallback: df_viz already has the original data (with Timestamp/NaN->str/None)
 
 
-                             if df_processed[y_col_name].isnull().sum() > len(df_processed) * 0.5:
-                                  logger.warning(f"Y-axis for {extracted_chart_type} from Series ('{y_col_name}') seems non-numeric. Proceeding anyway.")
+            # Added handling for 1 column DataFrame/Series result (e.g., value_counts().to_frame())
+            # This block also needs applymap/where applied AFTER df_viz creation
+            elif len(df_viz.columns) == 1 and extracted_chart_type in ["bar", "pie"]:
+                 # Assume the single column is the category/names
+                 x_col_name = df_viz.columns[0]
+                 # Create a new 'Value' column from the index for the values
+                 y_col_name = 'Value'
+                 df_viz['Value'] = df_viz.index.copy() # Create a new column from index
 
-                             data_for_plotly = {"data_frame": df_processed.to_dict(orient='list'), "x": x_col_name, "y": y_col_name}
-                             data_for_plotly["data_frame"] = deep_convert_numpy_to_python(data_for_plotly["data_frame"])
-                             
-
-                         except Exception as num_e:
-                             logger.warning(f"Could not fully numeric-coerce Y-axis for {extracted_chart_type} from Series ('{y_col_name}'): {num_e}. Proceeding with original Series data.")
-                             # Fallback: use the original DataFrame converted from Series (with potential NaNs to None)
-                             data_for_plotly = {"data_frame": result_df[[x_col_name, y_col_name]].to_dict(orient='list'), "x": x_col_name, "y": y_col_name}
-                             data_for_plotly["data_frame"] = deep_convert_numpy_to_python(data_for_plotly["data_frame"])
-
-                else:
-                     return None, "Series needs both index and values to transform for chart."
-
-            else: return None, "Input Series for visualization is empty."
-
-        if not data_for_plotly: # Check if data_for_plotly dict was populated
-             return None, f"Transformation for chart type '{extracted_chart_type}' did not produce valid data for Plotly."
-
-        # Final check on data_frame content
-        if 'data_frame' not in data_for_plotly or pd.DataFrame(data_for_plotly['data_frame']).empty:
-             return None, "Transformed data structure is missing 'data_frame' or it is empty."
+                 # Apply the Timestamp/NaN conversion to the *new* Value column as well
+                 df_viz['Value'] = df_viz['Value'].apply(lambda x: str(x) if isinstance(x, pd.Timestamp) else x)
+                 df_viz['Value'] = df_viz['Value'].where(pd.notnull(df_viz['Value']), None)
 
 
-        return data_for_plotly, None
+                 # For bar and pie, values must be numeric. Coerce errors to None and drop
+                 try:
+                      # Explicitly create Series before pd.to_numeric
+                      numeric_values_series = pd.to_numeric(pd.Series(df_viz[y_col_name]), errors='coerce')
+                      # Drop entries where value became None after coercion OR where name is None
+                      valid_indices = numeric_values_series.dropna().index.intersection(df_viz[x_col_name].dropna().index)
+
+                      df_viz = df_viz.loc[valid_indices].copy() # Filter df_viz
+                      df_viz[y_col_name] = numeric_values_series.loc[valid_indices] # Update Y column with numeric values
+
+                      if df_viz.empty:
+                           return None, f"{extracted_chart_type} chart from 1-column result requires non-null names and numeric values."
+
+
+                 except Exception as num_e:
+                      return None, f"Error ensuring numeric data for {extracted_chart_type} from 1-column result: {num_e}"
+
+            else: return None, f"Need at least 2 columns for {extracted_chart_type} chart (or 1 column Series result for bar/pie)."
+
+        else:
+            # This case should ideally not be reached if initial checks pass
+            return None, f"Unsupported data structure or chart type '{extracted_chart_type}' for transformation."
+
+
+        # Add column names to the data dict
+        if extracted_chart_type == "pie":
+            data_for_plotly["names"] = x_col_name # Map inferred X to names
+            data_for_plotly["values"] = y_col_name # Map inferred Y to values
+        else:
+            data_for_plotly["x"] = x_col_name
+            data_for_plotly["y"] = y_col_name
+            if color_col_name: # Only inferred for grouped_bar currently
+                data_for_plotly["color"] = color_col_name
+            # No automatic inference for size, etc. in LLM pipeline currently
+
+
+        # --- FINAL DATA CLEANUP BEFORE TO_DICT ---
+        # Ensure all values in the final df_viz are standard Python types or None
+        for col in df_viz.columns:
+             if pd.api.types.is_integer_dtype(df_viz[col]):
+                 df_viz[col] = df_viz[col].apply(lambda x: int(x) if pd.notnull(x) else None)
+             elif pd.api.types.is_float_dtype(df_viz[col]):
+                  df_viz[col] = df_viz[col].apply(lambda x: float(x) if pd.notnull(x) else None)
+             elif pd.api.types.is_bool_dtype(df_viz[col]):
+                  df_viz[col] = df_viz[col].apply(lambda x: bool(x) if pd.notnull(x) else None)
+             elif pd.api.types.is_object_dtype(df_viz[col]):
+                  df_viz[col] = df_viz[col].apply(lambda x: None if pd.isna(x) else x)
+
+
+        # Convert the processed DataFrame to the list-of-dicts format for Plotly Express
+        data_for_plotly["data_frame"] = df_viz.to_dict(orient='list')
+
+
     except Exception as e:
         logger.error(f"Error transforming data for visualization: {e}")
         return None, f"Error transforming data for visualization: {e}"
 
+    # Final check before returning
+    if not data_for_plotly or 'data_frame' not in data_for_plotly or pd.DataFrame(data_for_plotly['data_frame']).empty:
+        return None, "Transformation failed or resulted in no data after processing."
+
+    return data_for_plotly, None
 
 def generate_plotly_json(data: Union[Dict, pd.DataFrame, pd.Series], chart_type_str: str) -> Tuple[Optional[str], Optional[str]]:
     """
