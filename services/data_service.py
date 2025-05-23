@@ -53,30 +53,32 @@ def _to_json_serializable(result: Any) -> Any:
     """
     Converts various Pandas/NumPy result types into standard Python types
     suitable for JSON serialization. Handles DataFrames, Series, NumPy arrays,
-    and scalar NumPy types. Converts pandas nulls (NaN, NaT) to Python None.
+    lists, dicts, and scalar NumPy types. Converts pandas nulls (NaN, NaT) to Python None.
+    Recursively handles nested containers.
     """
     def _convert_scalar(x):
         if x is None:
             return None
-        if isinstance(x, np.integer):  # NumPy integer
+        if isinstance(x, np.integer):
             return int(x)
-        if isinstance(x, np.floating):  # NumPy float
+        if isinstance(x, np.floating):
             return float(x)
-        if isinstance(x, np.bool_):  # NumPy bool
+        if isinstance(x, np.bool_):
             return bool(x)
-        if isinstance(x, (pd.Timestamp, np.datetime64)):  # date/time
+        if isinstance(x, (pd.Timestamp, np.datetime64)):
             return str(x)
         return x
 
+    # Base None
     if result is None:
         return None
 
-    # DataFrame: replace NaNs with None, convert each cell, then to records
+    # Pandas DataFrame
     if isinstance(result, pd.DataFrame):
         df = result.where(pd.notnull(result), None)
         return df.applymap(_convert_scalar).to_dict(orient="records")
 
-    # Series: replace NaNs with None, convert each value, then to dict
+    # Pandas Series
     if isinstance(result, pd.Series):
         series = result.where(pd.notnull(result), None)
         processed = series.map(_convert_scalar)
@@ -85,11 +87,18 @@ def _to_json_serializable(result: Any) -> Any:
         except Exception:
             return {str(k): processed.loc[k] for k in processed.index}
 
-    # NumPy array: convert via Series, then to list
+    # NumPy ndarray
     if isinstance(result, np.ndarray):
-        series = pd.Series(result).where(pd.notnull(result), None)
-        processed = series.map(_convert_scalar)
-        return processed.tolist()
+        # convert array to list via recursion
+        return _to_json_serializable(result.tolist())
+
+    # Python list or tuple
+    if isinstance(result, (list, tuple)):
+        return [ _to_json_serializable(item) for item in result ]
+
+    # Python dict
+    if isinstance(result, dict):
+        return { str(k): _to_json_serializable(v) for k, v in result.items() }
 
     # NumPy scalar types
     if isinstance(result, np.integer):
@@ -105,14 +114,15 @@ def _to_json_serializable(result: Any) -> Any:
     if pd.isna(result):
         return None
 
-    # Fallback: if already JSON serializable, return; else convert to string
+    # Fallback: already JSON serializable?
     try:
         json.dumps(result)
         return result
     except (TypeError, OverflowError):
-        logger.warning(f"Result of type {type(result)} is not JSON serializable, converting to string.")
+        logger.warning(
+            f"Result of type {type(result)} is not JSON serializable, converting to string."
+        )
         return str(result)
-
 
 # --- Query Execution Helper (Used in Initial Analysis) ---
 def execute_query_local(query: str, df: pd.DataFrame) -> Tuple[Optional[Any], Optional[str]]:

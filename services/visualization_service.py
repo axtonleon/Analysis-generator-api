@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any, Tuple, List, Union
 import schemas
 import numpy as np
 from . import data_service
-from helpers import deep_convert_numpy_to_python
+
 
 import logging
 logger = logging.getLogger(__name__)
@@ -96,7 +96,7 @@ def prepare_data_for_plotly(
 
 
              data_for_plotly = {"data_frame": df_viz.to_dict(orient='list'), "x": x_col_name, "y": y_col_name, "color": color_col_name}
-             data_for_plotly["data_frame"] = deep_convert_numpy_to_python(data_for_plotly["data_frame"])
+             data_for_plotly["data_frame"] = data_service._to_json_serializable(data_for_plotly["data_frame"])
 
 
         elif chart_type in ["bar", "line", "scatter"]:
@@ -139,7 +139,7 @@ def prepare_data_for_plotly(
 
                      data_for_plotly["size"] = size_col_name
                      data_for_plotly["data_frame"] = df_viz.to_dict(orient='list') # Update data_frame after filtering size
-                     data_for_plotly["data_frame"] = deep_convert_numpy_to_python(data_for_plotly["data_frame"])
+                     data_for_plotly["data_frame"] = data_service._to_json_serializable(data_for_plotly["data_frame"])
 
                  except Exception as num_e:
                     return None, f"Error ensuring numeric data for size encoding ('{size_col_name}'): {num_e}"
@@ -167,7 +167,7 @@ def prepare_data_for_plotly(
 
             # Use column names directly for Plotly Express
             data_for_plotly["data_frame"] = df_viz.to_dict(orient='list') # Ensure data_frame is based on potentially filtered df_viz
-            data_for_plotly["data_frame"] = deep_convert_numpy_to_python(data_for_plotly["data_frame"])
+            data_for_plotly["data_frame"] = data_service._to_json_serializable(data_for_plotly["data_frame"])
             data_for_plotly["x"] = x_col_name
             data_for_plotly["y"] = y_col_name
             if color_col_name:
@@ -197,7 +197,7 @@ def prepare_data_for_plotly(
 
                 # For pie chart, Plotly Express takes dataframe and column names for 'names' and 'values'
                 data_for_plotly = {"data_frame": df_viz.to_dict(orient='list'), "names": x_col_name, "values": y_col_name}
-                data_for_plotly["data_frame"] = deep_convert_numpy_to_python(data_for_plotly["data_frame"])
+                data_for_plotly["data_frame"] = data_service._to_json_serializable(data_for_plotly["data_frame"])
 
             except Exception as num_e:
                  return None, f"Error ensuring numeric data for pie chart values ('{y_col_name}'): {num_e}"
@@ -431,6 +431,7 @@ def transform_data_for_visualization(result: Any, chart_type_str: str) -> Tuple[
 
         # Convert the processed DataFrame to the list-of-dicts format for Plotly Express
         data_for_plotly["data_frame"] = df_viz.to_dict(orient='list')
+        data_for_plotly["data_frame"] = data_service._to_json_serializable(data_for_plotly["data_frame"])
 
 
     except Exception as e:
@@ -570,7 +571,7 @@ def generate_plotly_json_from_specs(
     # 2. Generate Plotly JSON using the prepared data
     # Pass the *requested* chart_type directly, not from LLM recommendation string
     plotly_json_str, render_error = generate_plotly_json(prepared_data, chart_type)
-    plotly_json_str = deep_convert_numpy_to_python(plotly_json_str)
+    plotly_json_str = data_service._to_json_serializable(plotly_json_str)
 
     if render_error:
         viz_data.error = render_error
